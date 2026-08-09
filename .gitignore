@@ -22,3 +22,5 @@ local.properties
 /compile_commands.json
 /tmp
 video.sdp
+ISSUE.md
+/detect_model

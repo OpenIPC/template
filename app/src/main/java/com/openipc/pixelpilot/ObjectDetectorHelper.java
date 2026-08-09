@@ -13,6 +13,7 @@ import com.google.mediapipe.tasks.vision.core.RunningMode;
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector;
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetectorResult;
 
+import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
 
@@ -24,21 +25,22 @@ public class ObjectDetectorHelper {
     
     public static final int MODEL_EFFICIENTDETV0 = 0;
     public static final int MODEL_EFFICIENTDETV2 = 1;
+    public static final int MODEL_CUSTOM = 2;
     
     private final Context context;
     private final float threshold;
     private final int maxResults;
     private final int currentDelegate;
-    private final int currentModel;
+    private final ByteBuffer modelBuffer;
     
     private ObjectDetector objectDetector;
 
-    public ObjectDetectorHelper(Context context, float threshold, int maxResults, int delegate, int model) {
+    public ObjectDetectorHelper(Context context, float threshold, int maxResults, int delegate, ByteBuffer modelBuffer) {
         this.context = context;
         this.threshold = threshold;
         this.maxResults = maxResults;
         this.currentDelegate = delegate;
-        this.currentModel = model;
+        this.modelBuffer = modelBuffer;
         setupObjectDetector();
     }
 
@@ -50,11 +52,12 @@ public class ObjectDetectorHelper {
             baseOptionsBuilder.setDelegate(Delegate.CPU);
         }
 
-        String modelName = "efficientdet-lite0.tflite";
-        if (currentModel == MODEL_EFFICIENTDETV2) {
-            modelName = "efficientdet-lite2.tflite";
+        if (modelBuffer == null) {
+            Log.e(TAG, "No object detection model is available.");
+            return;
         }
-        baseOptionsBuilder.setModelAssetPath(modelName);
+        modelBuffer.rewind();
+        baseOptionsBuilder.setModelAssetBuffer(modelBuffer);
 
         try {
             ObjectDetector.ObjectDetectorOptions options = ObjectDetector.ObjectDetectorOptions.builder()

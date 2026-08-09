@@ -3,6 +3,7 @@ package com.openipc.pixelpilot;
 import android.annotation.SuppressLint;
 import android.app.Dialog;
 import android.content.BroadcastReceiver;
+import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -68,16 +69,21 @@ import com.openipc.wfbngrtl8812.WfbNgLink;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.Locale;
 import java.util.Timer;
@@ -99,6 +105,15 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private static final String TAG = "pixelpilot";
     private static final int PICK_KEY_REQUEST_CODE = 1;
     private static final int PICK_DVR_REQUEST_CODE = 2;
+    private static final int PICK_MODEL_REQUEST_CODE = 3;
+    private static final String MODEL_LITE0_FILE = "efficientdet-lite0.tflite";
+    private static final String MODEL_LITE2_FILE = "efficientdet-lite2.tflite";
+    private static final String MODEL_LITE0_URL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float32/1/efficientdet_lite0.tflite";
+    private static final String MODEL_LITE2_URL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float32/1/efficientdet_lite2.tflite";
+    private static final long MODEL_LITE0_BYTES = 13836895L;
+    private static final long MODEL_LITE2_BYTES = 23096891L;
+    private static final String PREF_OD_CUSTOM_MODEL_URI = "od_custom_model_uri";
+    private static final String PREF_OD_CUSTOM_MODEL_NAME = "od_custom_model_name";
     private static WifiManager wifiManager;
     final Handler handler = new Handler(Looper.getMainLooper());
     final Runnable runnable = new Runnable() {
@@ -128,6 +143,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private volatile boolean isObjectDetectionEnabled = false;
     private volatile boolean isDetecting = false;
     private final Object detectorLock = new Object();
+    private Boolean objectDetectionRuntimeSupported = null;
 
     private static final String PREF_DRONE_USERNAME = "drone_username";
     private static final String PREF_DRONE_PASSWORD = "drone_password";
@@ -1341,6 +1357,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                     startDvr(dvrUri);
                 }
             }
+        } else if (requestCode == PICK_MODEL_REQUEST_CODE && resultCode == RESULT_OK) {
+            if (data != null && data.getData() != null) {
+                handleSelectedModelUri(data);
+            }
         } else if (requestCode == 100) {  // VPN_REQUEST_CODE is 100
             if (resultCode == RESULT_OK) {
                 // VPN permission granted, start the VPN service
@@ -1851,10 +1871,17 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
         SharedPreferences prefs = getSharedPreferences("general", MODE_PRIVATE);
         boolean odEnabled = prefs.getBoolean("od_enabled", false);
+        boolean runtimeSupported = isObjectDetectionRuntimeSupported();
+        boolean selectedModelAvailable = isSelectedObjectDetectionModelAvailable();
+        String status = getObjectDetectionStatus(runtimeSupported, selectedModelAvailable);
+
+        MenuItem statusItem = odMenu.add(status);
+        statusItem.setEnabled(false);
 
         MenuItem enableItem = odMenu.add("Enable");
         enableItem.setCheckable(true);
-        enableItem.setChecked(odEnabled);
+        enableItem.setEnabled(runtimeSupported && selectedModelAvailable);
+        enableItem.setChecked(odEnabled && runtimeSupported && selectedModelAvailable);
         enableItem.setOnMenuItemClickListener(item -> {
             boolean newState = !item.isChecked();
             item.setChecked(newState);
@@ -1862,10 +1889,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             return true;
         });
 
-        SubMenu delegateMenu = odMenu.addSubMenu("Delegate");
+        SubMenu delegateMenu = odMenu.addSubMenu("Processing Unit");
         int savedDelegate = prefs.getInt("od_delegate", ObjectDetectorHelper.DELEGATE_CPU);
 
         MenuItem cpuItem = delegateMenu.add("CPU");
+        cpuItem.setEnabled(runtimeSupported);
         cpuItem.setCheckable(true);
         cpuItem.setChecked(savedDelegate == ObjectDetectorHelper.DELEGATE_CPU);
         cpuItem.setOnMenuItemClickListener(item -> {
@@ -1875,6 +1903,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         });
 
         MenuItem gpuItem = delegateMenu.add("GPU");
+        gpuItem.setEnabled(runtimeSupported && isGpuDelegateSupported());
         gpuItem.setCheckable(true);
         gpuItem.setChecked(savedDelegate == ObjectDetectorHelper.DELEGATE_GPU);
         gpuItem.setOnMenuItemClickListener(item -> {
@@ -1886,7 +1915,15 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         SubMenu modelMenu = odMenu.addSubMenu("Model");
         int savedModel = prefs.getInt("od_model", ObjectDetectorHelper.MODEL_EFFICIENTDETV0);
 
+        MenuItem downloadItem = modelMenu.add("Download Default models");
+        downloadItem.setEnabled(runtimeSupported);
+        downloadItem.setOnMenuItemClickListener(item -> {
+            downloadObjectDetectionModels();
+            return true;
+        });
+
         MenuItem v0Item = modelMenu.add("EfficientDet-Lite0");
+        v0Item.setEnabled(runtimeSupported && isDownloadedModelAvailable(ObjectDetectorHelper.MODEL_EFFICIENTDETV0));
         v0Item.setCheckable(true);
         v0Item.setChecked(savedModel == ObjectDetectorHelper.MODEL_EFFICIENTDETV0);
         v0Item.setOnMenuItemClickListener(item -> {
@@ -1896,6 +1933,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         });
 
         MenuItem v2Item = modelMenu.add("EfficientDet-Lite2");
+        v2Item.setEnabled(runtimeSupported && isDownloadedModelAvailable(ObjectDetectorHelper.MODEL_EFFICIENTDETV2));
         v2Item.setCheckable(true);
         v2Item.setChecked(savedModel == ObjectDetectorHelper.MODEL_EFFICIENTDETV2);
         v2Item.setOnMenuItemClickListener(item -> {
@@ -1903,11 +1941,47 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             restartObjectDetector();
             return true;
         });
+
+        MenuItem selectLocalItem = modelMenu.add("Select local model");
+        selectLocalItem.setEnabled(runtimeSupported);
+        selectLocalItem.setOnMenuItemClickListener(item -> {
+            selectLocalObjectDetectionModel();
+            return true;
+        });
+
+        if (isCustomModelAvailable()) {
+            String customModelName = prefs.getString(PREF_OD_CUSTOM_MODEL_NAME, "Local model");
+            MenuItem customItem = modelMenu.add(customModelName);
+            customItem.setEnabled(runtimeSupported);
+            customItem.setCheckable(true);
+            customItem.setChecked(savedModel == ObjectDetectorHelper.MODEL_CUSTOM);
+            customItem.setOnMenuItemClickListener(item -> {
+                prefs.edit().putInt("od_model", ObjectDetectorHelper.MODEL_CUSTOM).apply();
+                restartObjectDetector();
+                return true;
+            });
+        }
+
+ 
     }
 
     private void setObjectDetectionEnabled(boolean enabled) {
-        isObjectDetectionEnabled = enabled;
         SharedPreferences prefs = getSharedPreferences("general", MODE_PRIVATE);
+        if (enabled) {
+            boolean runtimeSupported = isObjectDetectionRuntimeSupported();
+            boolean modelAvailable = isSelectedObjectDetectionModelAvailable();
+            if (!runtimeSupported || !modelAvailable) {
+                isObjectDetectionEnabled = false;
+                prefs.edit().putBoolean("od_enabled", false).apply();
+                binding.detectionOverlay.setVisibility(View.GONE);
+                binding.detectionOverlay.clear();
+                stopObjectDetectionLoop();
+                Toast.makeText(this, getObjectDetectionStatus(runtimeSupported, modelAvailable), Toast.LENGTH_LONG).show();
+                return;
+            }
+        }
+
+        isObjectDetectionEnabled = enabled;
         prefs.edit().putBoolean("od_enabled", enabled).apply();
 
         if (enabled) {
@@ -1934,9 +2008,19 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
         SharedPreferences prefs = getSharedPreferences("general", MODE_PRIVATE);
         int delegate = prefs.getInt("od_delegate", ObjectDetectorHelper.DELEGATE_CPU);
-        int model = prefs.getInt("od_model", ObjectDetectorHelper.MODEL_EFFICIENTDETV0);
+        if (delegate == ObjectDetectorHelper.DELEGATE_GPU && !isGpuDelegateSupported()) {
+            delegate = ObjectDetectorHelper.DELEGATE_CPU;
+            prefs.edit().putInt("od_delegate", ObjectDetectorHelper.DELEGATE_CPU).apply();
+        }
+        final int detectorDelegate = delegate;
 
         objectDetectionExecutor.execute(() -> {
+            ByteBuffer modelBuffer = readSelectedObjectDetectionModel();
+            if (modelBuffer == null) {
+                runOnUiThread(() -> setObjectDetectionEnabled(false));
+                return;
+            }
+
             synchronized (detectorLock) {
                 if (objectDetectorHelper != null) {
                     objectDetectorHelper.clear();
@@ -1945,8 +2029,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                         VideoActivity.this,
                         0.5f,
                         3,
-                        delegate,
-                        model
+                        detectorDelegate,
+                        modelBuffer
                 );
             }
 
@@ -2012,5 +2096,235 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 objectDetectorHelper = null;
             }
         }
+    }
+
+    private File getObjectDetectionModelsDir() {
+        File modelsDir = new File(getFilesDir(), "models");
+        if (!modelsDir.exists() && !modelsDir.mkdirs()) {
+            Log.e(TAG, "Failed to create object detection models directory " + modelsDir);
+        }
+        return modelsDir;
+    }
+
+    private File getDownloadedModelFile(int model) {
+        String fileName = model == ObjectDetectorHelper.MODEL_EFFICIENTDETV2 ? MODEL_LITE2_FILE : MODEL_LITE0_FILE;
+        return new File(getObjectDetectionModelsDir(), fileName);
+    }
+
+    private boolean isDownloadedModelAvailable(int model) {
+        File file = getDownloadedModelFile(model);
+        long expectedBytes = model == ObjectDetectorHelper.MODEL_EFFICIENTDETV2 ? MODEL_LITE2_BYTES : MODEL_LITE0_BYTES;
+        return file.isFile() && file.length() == expectedBytes;
+    }
+
+    private boolean isCustomModelAvailable() {
+        String uriString = getSharedPreferences("general", MODE_PRIVATE).getString(PREF_OD_CUSTOM_MODEL_URI, null);
+        if (uriString == null) {
+            return false;
+        }
+        try (InputStream inputStream = getContentResolver().openInputStream(Uri.parse(uriString))) {
+            return inputStream != null;
+        } catch (Exception e) {
+            Log.e(TAG, "Custom object detection model is not available", e);
+            return false;
+        }
+    }
+
+    private boolean isSelectedObjectDetectionModelAvailable() {
+        SharedPreferences prefs = getSharedPreferences("general", MODE_PRIVATE);
+        int model = prefs.getInt("od_model", ObjectDetectorHelper.MODEL_EFFICIENTDETV0);
+        if (model == ObjectDetectorHelper.MODEL_CUSTOM) {
+            return isCustomModelAvailable();
+        }
+        return isDownloadedModelAvailable(model);
+    }
+
+    private String getObjectDetectionStatus(boolean runtimeSupported, boolean selectedModelAvailable) {
+        if (!runtimeSupported) {
+            return "Unavailable: device is not supported";
+        }
+        if (!selectedModelAvailable) {
+            return "Unavailable: model not installed";
+        }
+        return "Ready";
+    }
+
+    private boolean isObjectDetectionRuntimeSupported() {
+        if (objectDetectionRuntimeSupported != null) {
+            return objectDetectionRuntimeSupported;
+        }
+        if (!isObjectDetectionAbiSupported()) {
+            objectDetectionRuntimeSupported = false;
+            return false;
+        }
+        try {
+            Class.forName("com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector");
+            System.loadLibrary("mediapipe_tasks_vision_jni");
+            objectDetectionRuntimeSupported = true;
+            return true;
+        } catch (Throwable e) {
+            Log.e(TAG, "Object detection runtime is not available", e);
+            objectDetectionRuntimeSupported = false;
+            return false;
+        }
+    }
+
+    private boolean isObjectDetectionAbiSupported() {
+        return Arrays.asList(Build.SUPPORTED_64_BIT_ABIS).contains("arm64-v8a");
+    }
+
+    private boolean isGpuDelegateSupported() {
+        ActivityManager activityManager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        if (activityManager == null || activityManager.getDeviceConfigurationInfo() == null) {
+            return false;
+        }
+        return activityManager.getDeviceConfigurationInfo().reqGlEsVersion >= 0x00030001;
+    }
+
+    private void downloadObjectDetectionModels() {
+        Toast.makeText(this, "Downloading object detection models...", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                downloadObjectDetectionModel(ObjectDetectorHelper.MODEL_EFFICIENTDETV0);
+                downloadObjectDetectionModel(ObjectDetectorHelper.MODEL_EFFICIENTDETV2);
+                if (!isSelectedObjectDetectionModelAvailable()) {
+                    getSharedPreferences("general", MODE_PRIVATE)
+                            .edit()
+                            .putInt("od_model", ObjectDetectorHelper.MODEL_EFFICIENTDETV0)
+                            .apply();
+                }
+                runOnUiThread(() -> Toast.makeText(this, "Object detection models downloaded", Toast.LENGTH_LONG).show());
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to download object detection models", e);
+                runOnUiThread(() -> Toast.makeText(this, "Failed to download models: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        }).start();
+    }
+
+    private void downloadObjectDetectionModel(int model) throws IOException {
+        File target = getDownloadedModelFile(model);
+        long expectedBytes = model == ObjectDetectorHelper.MODEL_EFFICIENTDETV2 ? MODEL_LITE2_BYTES : MODEL_LITE0_BYTES;
+        if (target.isFile() && target.length() == expectedBytes) {
+            return;
+        }
+
+        String modelUrl = model == ObjectDetectorHelper.MODEL_EFFICIENTDETV2 ? MODEL_LITE2_URL : MODEL_LITE0_URL;
+        File tempFile = new File(target.getParentFile(), target.getName() + ".download");
+        HttpURLConnection connection = (HttpURLConnection) new URL(modelUrl).openConnection();
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(60000);
+        connection.connect();
+        int responseCode = connection.getResponseCode();
+        if (responseCode < 200 || responseCode >= 300) {
+            throw new IOException("HTTP " + responseCode);
+        }
+
+        long bytesCopied = 0;
+        try (InputStream inputStream = connection.getInputStream();
+             OutputStream outputStream = new FileOutputStream(tempFile)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = inputStream.read(buffer)) != -1) {
+                outputStream.write(buffer, 0, read);
+                bytesCopied += read;
+            }
+        } finally {
+            connection.disconnect();
+        }
+
+        if (bytesCopied != expectedBytes) {
+            if (!tempFile.delete()) {
+                Log.w(TAG, "Failed to delete incomplete model " + tempFile);
+            }
+            throw new IOException("Incomplete model download");
+        }
+        if (target.exists() && !target.delete()) {
+            throw new IOException("Failed to replace existing model");
+        }
+        if (!tempFile.renameTo(target)) {
+            throw new IOException("Failed to save model");
+        }
+    }
+
+    private void selectLocalObjectDetectionModel() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/octet-stream", "application/x-tflite"});
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(intent, PICK_MODEL_REQUEST_CODE);
+    }
+
+    private void handleSelectedModelUri(Intent data) {
+        Uri uri = data.getData();
+        if (uri == null) {
+            return;
+        }
+        String displayName = "Local model";
+        DocumentFile documentFile = DocumentFile.fromSingleUri(this, uri);
+        if (documentFile != null && documentFile.getName() != null) {
+            displayName = documentFile.getName();
+        }
+        if (!displayName.toLowerCase(Locale.US).endsWith(".tflite")) {
+            Toast.makeText(this, "Please select a .tflite model file", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        try (InputStream inputStream = getContentResolver().openInputStream(uri)) {
+            if (inputStream == null) {
+                throw new IOException("Unable to open model file");
+            }
+            final int takeFlags = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+            getContentResolver().takePersistableUriPermission(uri, takeFlags);
+            SharedPreferences.Editor editor = getSharedPreferences("general", MODE_PRIVATE).edit();
+            editor.putString(PREF_OD_CUSTOM_MODEL_URI, uri.toString());
+            editor.putString(PREF_OD_CUSTOM_MODEL_NAME, displayName);
+            editor.putInt("od_model", ObjectDetectorHelper.MODEL_CUSTOM);
+            editor.apply();
+            Toast.makeText(this, "Selected " + displayName, Toast.LENGTH_LONG).show();
+            restartObjectDetector();
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to select local object detection model", e);
+            Toast.makeText(this, "Failed to select model: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private ByteBuffer readSelectedObjectDetectionModel() {
+        SharedPreferences prefs = getSharedPreferences("general", MODE_PRIVATE);
+        int model = prefs.getInt("od_model", ObjectDetectorHelper.MODEL_EFFICIENTDETV0);
+        try {
+            if (model == ObjectDetectorHelper.MODEL_CUSTOM) {
+                String uriString = prefs.getString(PREF_OD_CUSTOM_MODEL_URI, null);
+                if (uriString == null) {
+                    return null;
+                }
+                try (InputStream inputStream = getContentResolver().openInputStream(Uri.parse(uriString))) {
+                    return readModelBuffer(inputStream);
+                }
+            }
+            try (InputStream inputStream = new FileInputStream(getDownloadedModelFile(model))) {
+                return readModelBuffer(inputStream);
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to read object detection model", e);
+            return null;
+        }
+    }
+
+    private ByteBuffer readModelBuffer(InputStream inputStream) throws IOException {
+        if (inputStream == null) {
+            throw new IOException("Model input stream is null");
+        }
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        byte[] buffer = new byte[64 * 1024];
+        int read;
+        while ((read = inputStream.read(buffer)) != -1) {
+            outputStream.write(buffer, 0, read);
+        }
+        byte[] bytes = outputStream.toByteArray();
+        ByteBuffer directBuffer = ByteBuffer.allocateDirect(bytes.length);
+        directBuffer.put(bytes);
+        directBuffer.rewind();
+        return directBuffer;
     }
 }

@@ -34,6 +34,7 @@ target_compile_definitions(wfb-ng PRIVATE
 #   Jaguar3 8822E (RTL8812EU / RTL8822EU) — e.g. LB-LINK BL-M8812EU2
 add_library(devourer STATIC
         # --- generation-agnostic core ---
+        ${CMAKE_SOURCE_DIR}/devourer/src/HalmacCfgParam.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/ParsedRadioPacket.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/Radiotap.c
         ${CMAKE_SOURCE_DIR}/devourer/src/RadiotapBuilder.cpp
@@ -44,10 +45,12 @@ add_library(devourer STATIC
         ${CMAKE_SOURCE_DIR}/devourer/src/TxMode.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/TxPower.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/LinkHealth.cpp
+        ${CMAKE_SOURCE_DIR}/devourer/src/LaCapture.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/SignalStop.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/WiFiDriver.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/PhyTableLoader.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/LaCapture.cpp
+        ${CMAKE_SOURCE_DIR}/devourer/src/chanmig/ChannelScore.cpp
+        ${CMAKE_SOURCE_DIR}/devourer/src/chanmig/MigGate.cpp
 
         # --- Jaguar1 (RTL8812AU / 8811AU / 8821AU) ---
         ${CMAKE_SOURCE_DIR}/devourer/hal/hal8812a_fw.c
