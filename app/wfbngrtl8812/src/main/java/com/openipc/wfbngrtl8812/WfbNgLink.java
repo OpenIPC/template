@@ -91,17 +91,35 @@ public class WfbNgLink implements WfbNGStatsChanged {
         nativeSetUseStbc(nativeWfbngLink, use);
     }
 
-    public synchronized void start(int wifiChannel, int bandWidth, UsbDevice usbDevice) {
+    public synchronized boolean start(int wifiChannel, int bandWidth, UsbDevice usbDevice) {
         Log.d(TAG, "wfb-ng monitoring on " + usbDevice.getDeviceName() + " using wifi channel " + wifiChannel);
         UsbManager usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+        // Returns null when the permission was revoked or the device disappeared between
+        // the permission check and here, which is easy to hit on a re-enumerating hub.
         UsbDeviceConnection usbDeviceConnection = usbManager.openDevice(usbDevice);
+        if (usbDeviceConnection == null) {
+            Log.e(TAG, "Could not open " + usbDevice.getDeviceName() + " (no permission or already gone)");
+            return false;
+        }
         int fd = usbDeviceConnection.getFileDescriptor();
+        if (fd < 0) {
+            Log.e(TAG, "Invalid file descriptor for " + usbDevice.getDeviceName());
+            usbDeviceConnection.close();
+            return false;
+        }
         Thread t = new Thread(() -> nativeRun(nativeWfbngLink, context, wifiChannel, bandWidth, fd));
-        t.setName("wfb-" + usbDevice.getDeviceName().split("/dev/bus/usb/")[1]);
+        t.setName(threadNameFor(usbDevice));
         linkThreads.put(usbDevice, t);
         linkConns.put(usbDevice, usbDeviceConnection);
-        linkThreads.get(usbDevice).start();
+        t.start();
         Log.d(TAG, "wfb-ng thread on " + usbDevice.getDeviceName() + " started.");
+        return true;
+    }
+
+    private static String threadNameFor(UsbDevice usbDevice) {
+        String name = usbDevice.getDeviceName();
+        String[] parts = name.split("/dev/bus/usb/");
+        return "wfb-" + (parts.length > 1 ? parts[1] : name);
     }
 
     public synchronized void stopAll() throws InterruptedException {
@@ -113,9 +131,13 @@ public class WfbNgLink implements WfbNGStatsChanged {
             if (t != null) {
                 t.join();
             }
+            // The connection holds a dup of the usbfs fd. Without close() every
+            // attach/detach cycle leaks one, until the process runs out.
+            entry.getValue().close();
             Log.d(TAG, "wfb-ng thread on " + entry.getKey().getDeviceName() + " done.");
         }
         linkThreads.clear();
+        linkConns.clear();
     }
 
     public synchronized void stop(UsbDevice dev) throws InterruptedException {
@@ -130,6 +152,8 @@ public class WfbNgLink implements WfbNGStatsChanged {
             t.join();
         }
         linkThreads.remove(dev);
+        linkConns.remove(dev);
+        conn.close();
     }
 
     public void SetWfbNGStatsChanged(final WfbNGStatsChanged callback) {

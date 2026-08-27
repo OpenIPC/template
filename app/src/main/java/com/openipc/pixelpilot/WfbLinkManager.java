@@ -133,6 +133,10 @@ public class WfbLinkManager extends BroadcastReceiver {
 
     public synchronized void refreshAdapters() {
         Map<String, UsbDevice> attachedAdapters = getAttachedAdapters();
+        if (attachedAdapters == null) {
+            Log.e(TAG, "Could not read the usb device filter, skipping adapter refresh.");
+            return;
+        }
 
         boolean missingPermissions = false;
         android.hardware.usb.UsbManager usbManager =
@@ -141,8 +145,13 @@ public class WfbLinkManager extends BroadcastReceiver {
             if (!usbManager.hasPermission(entry.getValue())) {
                 binding.tvMessage.setVisibility(View.VISIBLE);
                 binding.tvMessage.setText("No permission for wifi adapter(s) " + entry.getValue().getDeviceName());
+                // Android 14 refuses to deliver a PendingIntent built from an implicit
+                // intent to a runtime registered receiver, so the permission result never
+                // arrives unless the package is set explicitly.
+                Intent permissionIntent = new Intent(WfbLinkManager.ACTION_USB_PERMISSION);
+                permissionIntent.setPackage(context.getPackageName());
                 PendingIntent pendingIntent = PendingIntent.getBroadcast(context, 0,
-                        new Intent(WfbLinkManager.ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
+                        permissionIntent, PendingIntent.FLAG_IMMUTABLE);
                 usbManager.requestPermission(entry.getValue(), pendingIntent);
                 missingPermissions = true;
             }
@@ -168,8 +177,11 @@ public class WfbLinkManager extends BroadcastReceiver {
             if (activeWifiAdapters.containsKey(entry.getKey())) {
                 continue;
             }
-            startAdapter(entry.getValue());
-            activeWifiAdapters.put(entry.getKey(), entry.getValue());
+            // Only track it as active if it actually came up, otherwise a failed adapter
+            // is never retried on the next refresh.
+            if (startAdapter(entry.getValue())) {
+                activeWifiAdapters.put(entry.getKey(), entry.getValue());
+            }
         }
 
         if (activeWifiAdapters.isEmpty()) {
@@ -217,7 +229,10 @@ public class WfbLinkManager extends BroadcastReceiver {
         String text = "Starting wfb-ng channel " + wifiChannel + " with " + String.format(
                 "[%04X", dev.getVendorId()) + ":" + String.format("%04X]", dev.getProductId());
         binding.tvMessage.setText(text);
-        wfbLink.start(wifiChannel, bandWidth.getValue(), dev);
+        if (!wfbLink.start(wifiChannel, bandWidth.getValue(), dev)) {
+            binding.tvMessage.setText("Could not open wifi adapter " + dev.getDeviceName());
+            return false;
+        }
         return true;
     }
 }

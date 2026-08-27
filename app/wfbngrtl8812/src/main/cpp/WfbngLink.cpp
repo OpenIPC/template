@@ -34,12 +34,6 @@
 #undef TAG
 #define TAG "pixelpilot"
 
-#define CRASH()                                                                                                        \
-    do {                                                                                                               \
-        int *i = 0;                                                                                                    \
-        *i = 42;                                                                                                       \
-    } while (0)
-
 std::string generate_random_string(size_t length) {
     const std::string characters = "abcdefghijklmnopqrstuvwxyz";
     std::random_device rd;
@@ -283,8 +277,9 @@ int WfbngLink::run(JNIEnv *env, jobject context, jint wifiChannel, jint bw, jint
 
 void WfbngLink::stop(JNIEnv *env, jobject context, jint fd) {
     if (rtl_devices.find(fd) == rtl_devices.end()) {
-        __android_log_print(ANDROID_LOG_ERROR, TAG, "rtl_devices.find(%d) == rtl_devices.end()", fd);
-        CRASH();
+        // Happens when the adapter was already gone by the time the stop arrived, e.g. it
+        // was unplugged or the hub re-enumerated it. Nothing left to stop.
+        __android_log_print(ANDROID_LOG_WARN, TAG, "stop: no rtl device for fd=%d, already gone", fd);
         return;
     }
     auto dev = rtl_devices.at(fd).get();
