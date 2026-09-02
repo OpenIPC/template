@@ -37,7 +37,6 @@ static void h264_configureAMediaFormat(KeyFrameFinder& kff, AMediaFormat* format
     // AMediaFormat_setInt32(format,AMEDIAFORMAT_KEY_FRAME_RATE,60);
     // AVCProfileBaseline==1
     // AMediaFormat_setInt32(decoder.format,AMEDIAFORMAT_KEY_PROFILE,1);
-    // AMediaFormat_setInt32(decoder.format,AMEDIAFORMAT_KEY_PRIORITY,0);
 }
 
 static void h265_configureAMediaFormat(KeyFrameFinder& kff, AMediaFormat* format)
