@@ -173,6 +173,7 @@ public class WfbLinkManager extends BroadcastReceiver {
         }
 
         // Starts newly attached adapters.
+        boolean startFailed = false;
         for (Map.Entry<String, UsbDevice> entry : attachedAdapters.entrySet()) {
             if (activeWifiAdapters.containsKey(entry.getKey())) {
                 continue;
@@ -181,11 +182,18 @@ public class WfbLinkManager extends BroadcastReceiver {
             // is never retried on the next refresh.
             if (startAdapter(entry.getValue())) {
                 activeWifiAdapters.put(entry.getKey(), entry.getValue());
+            } else {
+                startFailed = true;
             }
         }
 
         if (activeWifiAdapters.isEmpty()) {
-            String text = "No compatible wifi adapter found.";
+            // Now that a failed start no longer counts as active, an empty map covers two
+            // different problems, and blaming the filter for both sends people looking in
+            // the wrong place.
+            String text = startFailed
+                    ? "Wifi adapter found but could not be started - see the log."
+                    : "No compatible wifi adapter found.";
             binding.tvMessage.setText(text);
             binding.tvMessage.setVisibility(View.VISIBLE);
 
