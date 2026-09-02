@@ -102,7 +102,13 @@ public class WfbLinkManager extends BroadcastReceiver {
         }
 
         Map<String, UsbDevice> res = new HashMap<>();
-        for (UsbDevice dev : manager.getDeviceList().values()) {
+        Map<String, UsbDevice> attached = manager.getDeviceList();
+        // "No compatible wifi adapter found." is a common report, and the one thing needed to
+        // act on it - the adapter's vendor and product id - was not obtainable. sysfs is not
+        // readable by the shell on some devices (Horizon OS for one) and dumpsys usb does not
+        // list host devices there either, so the app is the only thing that can report it.
+        Log.i(TAG, "usb devices attached: " + attached.size());
+        for (UsbDevice dev : attached.values()) {
             boolean allowed = false;
             for (UsbDeviceFilter filter : filters) {
                 if (filter.productId == dev.getProductId() && filter.vendorId == dev.getVendorId()) {
@@ -110,6 +116,13 @@ public class WfbLinkManager extends BroadcastReceiver {
                     break;
                 }
             }
+            Log.i(TAG, String.format("  %s  %04X:%04X  %s %s  -> %s",
+                    dev.getDeviceName(),
+                    dev.getVendorId(),
+                    dev.getProductId(),
+                    String.valueOf(dev.getManufacturerName()),
+                    String.valueOf(dev.getProductName()),
+                    allowed ? "supported" : "NOT in usb_device_filter.xml"));
             if (!allowed) {
                 continue;
             }
@@ -164,7 +177,7 @@ public class WfbLinkManager extends BroadcastReceiver {
             binding.tvMessage.setText(text);
             binding.tvMessage.setVisibility(View.VISIBLE);
 
-            String wifi = VideoActivity.wirelessInfo();
+            String wifi = VideoActivity.wirelessInfo(context);
             if (wifi != null) {
                 String local = "udp://" + wifi + ":5600";
                 binding.wifiMessage.setText(local);

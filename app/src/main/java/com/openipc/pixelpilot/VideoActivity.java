@@ -16,6 +16,7 @@ import android.graphics.Color;
 import android.hardware.usb.UsbManager;
 import android.net.Uri;
 import android.net.VpnService;
+import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Build;
@@ -114,7 +115,6 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private static final long MODEL_LITE2_BYTES = 23096891L;
     private static final String PREF_OD_CUSTOM_MODEL_URI = "od_custom_model_uri";
     private static final String PREF_OD_CUSTOM_MODEL_NAME = "od_custom_model_name";
-    private static WifiManager wifiManager;
     final Handler handler = new Handler(Looper.getMainLooper());
     final Runnable runnable = new Runnable() {
         public void run() {
@@ -170,8 +170,26 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 Context.MODE_PRIVATE).getInt("bandwidth", 20);
     }
 
-    public static String wirelessInfo() {
-        int address = wifiManager.getConnectionInfo().getIpAddress();
+    /**
+     * IPv4 address on the device's own wifi, used to tell the user where to push a stream
+     * when no adapter is attached. Returns null when there is nothing to report.
+     *
+     * <p>Takes a Context rather than reading a static WifiManager that only
+     * {@link #initializeUI()} assigns: any other caller - or this one before onCreate has got
+     * that far - hits a NullPointerException, and this is called from
+     * WfbLinkManager.refreshAdapters().
+     */
+    public static String wirelessInfo(Context context) {
+        WifiManager manager =
+                (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (manager == null) {
+            return null;
+        }
+        WifiInfo info = manager.getConnectionInfo();
+        if (info == null) {
+            return null;
+        }
+        int address = info.getIpAddress();
         return (address == 0) ? null : Formatter.formatIpAddress(address);
     }
 
@@ -324,7 +342,6 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
 
-        wifiManager = (WifiManager) getSystemService(WIFI_SERVICE);
     }
 
     // ----------------------------------------------------------------------------
