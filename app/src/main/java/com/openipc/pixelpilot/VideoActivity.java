@@ -202,6 +202,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     }
 
     private void resetApp() {
+        // Finalize an active recording first. System.exit() below skips every lifecycle
+        // callback, and the MP4 is only closed when the DVR thread exits; stopDvr() joins
+        // it. No-op when nothing is recording.
+        stopDvr();
         // Restart the app
         Intent intent = getPackageManager().getLaunchIntentForPackage(getPackageName());
         if (intent != null) {
@@ -700,8 +704,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         lowLatencyItem.setOnMenuItemClickListener(item -> {
             boolean enabled = !item.isChecked();
             item.setChecked(enabled);
+            // commit(), not apply(): resetApp() ends the process with System.exit()
+            // before an asynchronous write would be flushed.
             getSharedPreferences("general", MODE_PRIVATE).edit()
-                    .putBoolean("low_latency_decoder", enabled).apply();
+                    .putBoolean("low_latency_decoder", enabled).commit();
             item.setShowAsAction(MenuItem.SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW);
             item.setActionView(new View(this));
             resetApp();
