@@ -18,6 +18,7 @@ extern "C" {
 #include <list>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <vector> // Added for std::vector
 
@@ -59,6 +60,32 @@ class WfbngLink {
     bool stbc_enabled{true};
 
     std::map<int, std::shared_ptr<IRtlDevice>> rtl_devices;
+
+    // Set by stop() and read by run(). A StopRxLoop() only takes effect once the RX loop is
+    // running: RtlJaguarDevice::StartRxLoop() clears should_stop on entry, so a stop that
+    // lands anywhere before that - including the whole chip bring-up in InitWrite(), which
+    // is the longest part of run() - is thrown away, and run() then blocks in a loop nobody
+    // asked for. Recorded here instead, so run() can see it at the points where the flag
+    // itself cannot be trusted.
+    std::mutex    stop_requested_mutex;
+    std::set<int> stop_requested_fds;
+
+    void note_stop_requested(int fd) {
+        std::lock_guard<std::mutex> lock(stop_requested_mutex);
+        stop_requested_fds.insert(fd);
+    }
+
+    // Cleared at the start of run(): fd numbers are reused, so a request left over from a
+    // previous session on the same number must not abort the new one.
+    void clear_stop_request(int fd) {
+        std::lock_guard<std::mutex> lock(stop_requested_mutex);
+        stop_requested_fds.erase(fd);
+    }
+
+    bool stop_requested(int fd) {
+        std::lock_guard<std::mutex> lock(stop_requested_mutex);
+        return stop_requested_fds.count(fd) > 0;
+    }
     std::unique_ptr<std::thread> link_quality_thread{nullptr};
     bool should_clear_stats{false};
     FecChangeController fec;

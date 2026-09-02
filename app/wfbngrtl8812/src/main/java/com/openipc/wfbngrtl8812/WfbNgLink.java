@@ -9,6 +9,7 @@ import android.util.Log;
 import androidx.annotation.Keep;
 
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -100,6 +101,17 @@ public class WfbNgLink implements WfbNGStatsChanged {
                     + ", not starting a second");
             return true;
         }
+        if (existing != null) {
+            // A thread that outlived its join has since finished, so the connection stop()
+            // deliberately left open can go now. Otherwise the put() below would drop the
+            // last reference to it and leak the fd.
+            UsbDeviceConnection stale = linkConns.remove(usbDevice);
+            if (stale != null) {
+                Log.d(TAG, "releasing the usb connection left behind on " + usbDevice.getDeviceName());
+                stale.close();
+            }
+            linkThreads.remove(usbDevice);
+        }
         Log.d(TAG, "wfb-ng monitoring on " + usbDevice.getDeviceName() + " using wifi channel " + wifiChannel);
         UsbManager usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
         // Returns null when the permission was revoked or the device disappeared between
@@ -140,31 +152,48 @@ public class WfbNgLink implements WfbNGStatsChanged {
      */
     private static final long JOIN_TIMEOUT_MS = 3000;
 
-    private static void joinBounded(Thread t, String what) throws InterruptedException {
+    /**
+     * @return true if the thread is gone and its usb connection can be released.
+     */
+    private static boolean joinBounded(Thread t, String what) throws InterruptedException {
         if (t == null) {
-            return;
+            return true;
         }
         t.join(JOIN_TIMEOUT_MS);
         if (t.isAlive()) {
+            // Nothing else may be torn down while the thread is still inside devourer.
+            // libusb_wrap_sys_device() keeps the fd it is given rather than duplicating it,
+            // so closing the UsbDeviceConnection now pulls the fd out from under a libusb
+            // that is still polling it. The kernel cancels the URBs on close but libusb
+            // never reaps them - op_handle_events() looks at POLLERR and not POLLNVAL - so
+            // poll() returns immediately, forever, and the loop spins on one core waiting
+            // for a transfer count that will never drop. Both map entries stay too, so
+            // start() can still see the thread and refuse a second RX loop on the device.
             Log.e(TAG, "wfb-ng thread on " + what + " did not stop within " + JOIN_TIMEOUT_MS
-                    + "ms, leaving it behind");
-        } else {
-            Log.d(TAG, "wfb-ng thread on " + what + " done.");
+                    + "ms, leaving it and its usb connection in place");
+            return false;
         }
+        Log.d(TAG, "wfb-ng thread on " + what + " done.");
+        return true;
     }
 
     public synchronized void stopAll() throws InterruptedException {
         for (Map.Entry<UsbDevice, UsbDeviceConnection> entry : linkConns.entrySet()) {
             nativeStop(nativeWfbngLink, context, entry.getValue().getFileDescriptor());
         }
-        for (Map.Entry<UsbDevice, UsbDeviceConnection> entry : linkConns.entrySet()) {
-            joinBounded(linkThreads.get(entry.getKey()), entry.getKey().getDeviceName());
-            // The connection holds a dup of the usbfs fd. Without close() every
-            // attach/detach cycle leaks one, until the process runs out.
+        Iterator<Map.Entry<UsbDevice, UsbDeviceConnection>> it = linkConns.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<UsbDevice, UsbDeviceConnection> entry = it.next();
+            UsbDevice dev = entry.getKey();
+            if (!joinBounded(linkThreads.get(dev), dev.getDeviceName())) {
+                continue;
+            }
+            // Without close() every attach/detach cycle leaks the fd openDevice() handed
+            // out, until the process runs out - but only once nothing is using it.
+            linkThreads.remove(dev);
+            it.remove();
             entry.getValue().close();
         }
-        linkThreads.clear();
-        linkConns.clear();
     }
 
     public synchronized void stop(UsbDevice dev) throws InterruptedException {
@@ -174,7 +203,9 @@ public class WfbNgLink implements WfbNGStatsChanged {
         }
         int fd = conn.getFileDescriptor();
         nativeStop(nativeWfbngLink, context, fd);
-        joinBounded(linkThreads.get(dev), dev.getDeviceName());
+        if (!joinBounded(linkThreads.get(dev), dev.getDeviceName())) {
+            return;
+        }
         linkThreads.remove(dev);
         linkConns.remove(dev);
         conn.close();
