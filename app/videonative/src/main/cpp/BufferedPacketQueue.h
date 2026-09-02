@@ -5,9 +5,11 @@
 #include <cstdio>
 #endif
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 
 #include <unordered_map>
@@ -15,10 +17,27 @@
 
 // Define logging tag and maximum buffer size
 #define BUFFERED_QUEUE_LOG_TAG "BufferedPacketQueue"
-// Considering the packet rate about 100 packets per second, 10 packets should be enough
+// Last-resort cap on the buffer. How long this is in wall clock time depends entirely on the
+// packet rate, which is why it cannot be the only bound - see MAX_BUFFER_AGE.
 constexpr size_t MAX_BUFFER_SIZE = 15;
 // Number of monotonically increasing packets
 constexpr size_t MONOTONIC_THRESHOLD = 5;
+// A monotonic run is only tracked while the gap is plausibly a reorder. Kept separate from
+// MONOTONIC_THRESHOLD: the gap grows by one with every packet held back, so gating the counter
+// on the same value it is compared against means it can never reach it.
+constexpr size_t MONOTONIC_MAX_DISTANCE = 64;
+
+// Clock used to bound how long a packet may be held back.
+using QueueClock     = std::chrono::steady_clock;
+using QueueTimePoint = QueueClock::time_point;
+
+// A gap in the sequence numbers on this path is almost always a packet that FEC could not
+// recover, not a reorder: by the time packets get here they have come through wfb-ng and a
+// loopback socket, where reordering takes microseconds. Waiting for a packet that will never
+// arrive is pure added latency, so the wait is bounded in time rather than in packets - the
+// packet bound alone is worth ~20ms on a 1080p video stream but ~300ms on the audio stream,
+// which runs at a fraction of the packet rate.
+constexpr auto MAX_BUFFER_AGE = std::chrono::milliseconds(20);
 
 // Type definition for sequence numbers
 using SeqType   = uint16_t;
@@ -45,13 +64,31 @@ class BufferedPacketQueue
      * @param callback Callable to handle processed packets.
      */
     template <typename Callback>
-    void processPacket(SeqType currPacketIdx, const uint8_t* data, std::size_t data_length, Callback& callback)
+    void processPacket(
+        SeqType         currPacketIdx,
+        const uint8_t*  data,
+        std::size_t     data_length,
+        Callback&       callback,
+        QueueTimePoint  now = QueueClock::now())
     {
         logDebug(
             "Processing packet with Sequence=%u, lastPacketIdx=%u, firstPacket=%s",
             currPacketIdx,
             mLastPacketIdx,
             mFirstPacket ? "true" : "false");
+
+        // Before anything else: give up on a gap we have been waiting on for too long. Done
+        // here rather than in handleOutOfOrderPacket so that an in-order packet arriving after
+        // a stall does not get delivered ahead of what is already buffered.
+        if (!mPackets.empty() && (now - mOldestBufferedAt) >= MAX_BUFFER_AGE)
+        {
+            logWarning(
+                "Held %zu packet(s) for more than %lldms waiting on Sequence=%u. Flushing.",
+                mPackets.size(),
+                (long long) MAX_BUFFER_AGE.count(),
+                static_cast<unsigned>(static_cast<SeqType>(mLastPacketIdx + 1)));
+            mLastPacketIdx = drainBufferInOrder(callback);
+        }
 
         if (isFirstPacket(currPacketIdx))
         {
@@ -73,7 +110,7 @@ class BufferedPacketQueue
         else
         {
             // Out-of-order packet
-            handleOutOfOrderPacket(currPacketIdx, data, data_length, callback);
+            handleOutOfOrderPacket(currPacketIdx, data, data_length, callback, now);
         }
     }
 
@@ -82,6 +119,9 @@ class BufferedPacketQueue
     SeqType mLastPacketIdx;
 
     std::unordered_map<SeqType, std::vector<uint8_t>> mPackets;
+
+    // When the current stall started, i.e. when mPackets last went from empty to non-empty.
+    QueueTimePoint mOldestBufferedAt{};
 
     // This variable is used to track a situation where the sequence number is increasing monotonically while packets
     // are out of order. if this counter reaches MONOTONIC_THRESHOLD, we will restart buffering and update lastPacketIdx
@@ -174,7 +214,12 @@ class BufferedPacketQueue
      * @param callback Callable to handle processed packets.
      */
     template <typename Callback>
-    void handleOutOfOrderPacket(SeqType currPacketIdx, const uint8_t* data, std::size_t data_length, Callback& callback)
+    void handleOutOfOrderPacket(
+        SeqType        currPacketIdx,
+        const uint8_t* data,
+        std::size_t    data_length,
+        Callback&      callback,
+        QueueTimePoint now)
     {
         logDebug("Out-of-order packet detected. Sequence=%u", currPacketIdx);
 
@@ -184,10 +229,15 @@ class BufferedPacketQueue
             // return;
         }
 
-        bufferPacket(currPacketIdx, data, data_length);
+        bufferPacket(currPacketIdx, data, data_length, now);
 
-        auto dist = calculateDistance(currPacketIdx, mLastPacketIdx);
-        if (std::abs(dist) < MONOTONIC_THRESHOLD)
+        // calculateDistance(a, b) is how far b is ahead of a - see seqLessThan below - so the
+        // question "is this packet ahead of the last one we delivered" has to be asked in that
+        // order. Reversed, dist is negative for exactly the case this heuristic exists for (a
+        // gap ahead of us), the else branch below clears the counter every time, and the
+        // buffer only ever drains on the MAX_BUFFER_SIZE cap.
+        auto dist = calculateDistance(mLastPacketIdx, currPacketIdx);
+        if (static_cast<size_t>(std::abs(dist)) < MONOTONIC_MAX_DISTANCE)
         {
             // Check for monotonic increases
             if (dist > 0)
@@ -231,8 +281,15 @@ class BufferedPacketQueue
      * @param data Pointer to the packet data.
      * @param data_length Size of the packet data.
      */
-    void bufferPacket(SeqType currPacketIdx, const uint8_t* data, std::size_t data_length)
+    void bufferPacket(SeqType currPacketIdx, const uint8_t* data, std::size_t data_length, QueueTimePoint now)
     {
+        // Only the start of a stall is recorded, because the buffer is always drained as a
+        // whole. A partial drain leaves the mark where it was, which errs towards flushing
+        // early - the safe direction on a live link.
+        if (mPackets.empty())
+        {
+            mOldestBufferedAt = now;
+        }
         mPackets[currPacketIdx] = std::vector<uint8_t>(data, data + data_length);
         logDebug("Buffered out-of-order packet. Buffer size: %zu", mPackets.size());
     }
@@ -244,6 +301,19 @@ class BufferedPacketQueue
      */
     template <typename Callback>
     void restartBuffering(Callback& callback, SeqType currPacketIdx)
+    {
+        drainBufferInOrder(callback);
+        mLastPacketIdx = currPacketIdx;
+    }
+
+    /**
+     * @brief Delivers everything currently held back, in sequence order, and empties the buffer.
+     * @tparam Callback A callable type that processes the packet data.
+     * @param callback Callable to handle processed packets.
+     * @return The highest sequence number delivered, or mLastPacketIdx if nothing was held.
+     */
+    template <typename Callback>
+    SeqType drainBufferInOrder(Callback& callback)
     {
         // Process as many in-order buffered packets as possible
         processBufferedPackets(callback);
@@ -269,18 +339,24 @@ class BufferedPacketQueue
                 [](const auto& a, const auto& b) { return a->first < b->first; });
 
             // Iterate over the sorted packets and invoke the callback
+            SeqType highest = mLastPacketIdx;
             for (const auto& it : sortedPackets)
             {
                 const auto& packet = it->second;
                 logDebug("Processing possibly out-of-order buffered packet with Sequence=%u.", it->first);
                 callback(packet.data(), packet.size());
+                if (calculateDistance(highest, it->first) > 0)
+                {
+                    highest = it->first;
+                }
             }
 
             mPackets.clear();
             // Reset the monotonic increase counter
             mMonotonicOutOfOrderIncreaseCount = 0;
+            return highest;
         }
-        mLastPacketIdx = currPacketIdx;
+        return mLastPacketIdx;
     }
 
     /**

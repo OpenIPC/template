@@ -25,7 +25,7 @@ enable_testing()
 
 # ---------- Test executable --------------------------------------------------
 add_executable(queue_test
-    BufferedPacketqueue_test.cpp
+    BufferedPacketQueue_test.cpp
 )
 
 target_include_directories(queue_test PUBLIC
