@@ -246,10 +246,8 @@ class BufferedPacketQueue
                 logDebug("Monotonic increase count: %zu", mMonotonicOutOfOrderIncreaseCount);
                 if (mMonotonicOutOfOrderIncreaseCount >= MONOTONIC_THRESHOLD)
                 {
-                    restartBuffering(callback, currPacketIdx);
-                    // Update lastPacketIdx to the highest sequence index received
-                    SeqType newLastIdx = currPacketIdx;
-                    logWarning("Monotonic threshold reached. Updating lastPacketIdx to %u", newLastIdx);
+                    mLastPacketIdx = drainBufferInOrder(callback);
+                    logWarning("Monotonic threshold reached. Updating lastPacketIdx to %u", mLastPacketIdx);
                 }
             }
             else
@@ -264,7 +262,7 @@ class BufferedPacketQueue
         {
             logWarning(
                 "Buffer size exceeded MAX_BUFFER_SIZE (%zu). Processing in-order buffered packets.", MAX_BUFFER_SIZE);
-            restartBuffering(callback, currPacketIdx);
+            mLastPacketIdx = drainBufferInOrder(callback);
         }
     }
 
@@ -295,18 +293,6 @@ class BufferedPacketQueue
     }
 
     /**
-     * @brief Handles buffer overflow by processing in-order packets and discarding others.
-     * @tparam Callback A callable type that processes the packet data.
-     * @param callback Callable to handle processed packets.
-     */
-    template <typename Callback>
-    void restartBuffering(Callback& callback, SeqType currPacketIdx)
-    {
-        drainBufferInOrder(callback);
-        mLastPacketIdx = currPacketIdx;
-    }
-
-    /**
      * @brief Delivers everything currently held back, in sequence order, and empties the buffer.
      * @tparam Callback A callable type that processes the packet data.
      * @param callback Callable to handle processed packets.
@@ -332,14 +318,23 @@ class BufferedPacketQueue
                 sortedPackets.push_back(it);
             }
 
-            // Sort the vector based on the keys
+            // Sorted by distance from the last delivered packet, not by raw value: a block
+            // that straddles the wrap point (65534, 65535, 0, 1) sorts to 0, 1, 65534, 65535
+            // by value, and would be handed to the parser in that order.
+            const SeqType from = mLastPacketIdx;
             std::sort(
                 sortedPackets.begin(),
                 sortedPackets.end(),
-                [](const auto& a, const auto& b) { return a->first < b->first; });
+                [from](const auto& a, const auto& b) {
+                    return static_cast<SeqType>(a->first - from) < static_cast<SeqType>(b->first - from);
+                });
 
-            // Iterate over the sorted packets and invoke the callback
-            SeqType highest = mLastPacketIdx;
+            // Seeded from a packet that is actually in the buffer rather than from
+            // mLastPacketIdx. RTP starts at a random sequence number, so a VTX that reboots
+            // mid-session can land more than half the sequence space away, where
+            // calculateDistance() reads as negative - seeded from mLastPacketIdx nothing
+            // would ever move and the queue would never resync.
+            SeqType highest = sortedPackets.front()->first;
             for (const auto& it : sortedPackets)
             {
                 const auto& packet = it->second;
