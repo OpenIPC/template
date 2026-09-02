@@ -413,8 +413,16 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // Object detection reads frames back with TextureView.getBitmap(), which forces
         // the video through the view hierarchy's GPU composition. Without it a
         // SurfaceView is used so the video stays on a hardware overlay plane.
+        //
+        // The preference alone is not enough: setObjectDetectionEnabled() turns detection
+        // back off in onResume when the runtime or the selected model is missing, and returns
+        // before the renderer swap - which would leave the session on the TextureView with
+        // nothing reading from it. Both checks are cheap when od_enabled is false, and when
+        // it is true the runtime check only loads a library that is about to be used anyway.
         videoUsesTextureView = getSharedPreferences("general", MODE_PRIVATE)
-                .getBoolean("od_enabled", false);
+                        .getBoolean("od_enabled", false)
+                && isObjectDetectionRuntimeSupported()
+                && isSelectedObjectDetectionModelAvailable();
 
         if (videoUsesTextureView) {
             binding.mainVideoSurface.setVisibility(View.GONE);
@@ -2063,7 +2071,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
 
         isObjectDetectionEnabled = enabled;
-        prefs.edit().putBoolean("od_enabled", enabled).apply();
+        // commit(), not apply(): the restart below ends the process with System.exit()
+        // before an asynchronous write would be flushed, and the renderer picked on the
+        // next launch is read from exactly this value.
+        prefs.edit().putBoolean("od_enabled", enabled).commit();
 
         // Enabling / disabling detection swaps the main video renderer. Handing the
         // decoder a different surface at runtime would need the receiver lifecycle in
