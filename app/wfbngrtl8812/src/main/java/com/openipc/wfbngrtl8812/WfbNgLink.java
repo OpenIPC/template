@@ -7,7 +7,6 @@ import android.hardware.usb.UsbManager;
 import android.util.Log;
 
 import androidx.annotation.Keep;
-import androidx.appcompat.app.AppCompatActivity;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -50,7 +49,7 @@ public class WfbNgLink implements WfbNGStatsChanged {
     public static native void nativeSetUseLdpc(long nativeInstance, int use);
     public static native void nativeSetUseStbc(long nativeInstance, int use);
 
-    public WfbNgLink(final AppCompatActivity parent) {
+    public WfbNgLink(final Context parent) {
         this.context = parent;
         nativeWfbngLink = nativeInitialize(context);
         timer = new Timer();
